@@ -1,10 +1,13 @@
 """Transport-only unit tests; no SSH, model, or credentials required."""
+import sqlite3
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
-from hermes_cli.dsh_worker_adapter import run_dsh, remote_command, _run_streaming
+from hermes_cli.dsh_worker_adapter import run_dsh, remote_command, _run_streaming, ClaimFence, claim_is_current
 
 
 class TestDshAdapter(unittest.TestCase):
@@ -62,6 +65,33 @@ class TestDshAdapter(unittest.TestCase):
     def test_streaming_rejects_large_output(self):
         with self.assertRaises(ValueError):
             _run_streaming([sys.executable, "-c", "print('x' * (5 * 1024 * 1024))"], "task", 5)
+
+    def test_hermes_claim_pre_and_post_conditions(self):
+        with tempfile.TemporaryDirectory() as root:
+            db = str(Path(root) / "board.db")
+            with sqlite3.connect(db) as con:
+                con.execute("CREATE TABLE tasks (id TEXT, status TEXT, current_run_id INTEGER, claim_lock TEXT)")
+                con.execute("CREATE TABLE task_runs (id INTEGER, ended_at INTEGER)")
+                con.execute("INSERT INTO tasks VALUES ('t_1234', 'running', 7, 'lock-a')")
+                con.execute("INSERT INTO task_runs VALUES (7, NULL)")
+            fence = ClaimFence(db, "t_1234", 7, "lock-a")
+            self.assertTrue(claim_is_current(fence))
+            def swapped_runner(*_args, **_kwargs):
+                with sqlite3.connect(db) as con:
+                    con.execute("UPDATE tasks SET claim_lock='lock-b'")
+                return subprocess.CompletedProcess([], 0, "completed", "")
+            result = run_dsh(**self.kw, claim_fence=fence, runner=swapped_runner)
+            self.assertEqual(result.status, "stale")
+            self.assertEqual(result.output, "")
+            self.assertFalse(claim_is_current(fence))
+
+    def test_refuse_stale_claim_before_spawn(self):
+        with tempfile.TemporaryDirectory() as root:
+            fence = ClaimFence(str(Path(root) / "missing.db"), "t_1234", 9, "lock")
+            runner = Mock()
+            result = run_dsh(**self.kw, claim_fence=fence, runner=runner)
+            self.assertEqual(result.status, "stale")
+            runner.assert_not_called()
 
     def test_timeout(self):
         runner = Mock(side_effect=subprocess.TimeoutExpired("ssh", 3))

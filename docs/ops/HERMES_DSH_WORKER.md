@@ -8,7 +8,7 @@ does not change Kanban dispatch or install an unattended DSH worker in productio
 Hermes retains **all** responsibility for admission, claim ownership, completion,
 retry budget, PR acceptance and approval states. The adapter returns one of:
 `disabled`, `returned`, `failed`, `timed_out`, `transport_error`,
-`approval_blocked`. **Returned does not mean done**.
+`approval_blocked`, `stale`. **Returned does not mean done**.
 
 DSH is invoked through SSH on Helium WSL using:
 
@@ -19,7 +19,11 @@ dsh --profile headless --json --permission-mode workspace-write --approval-polic
 The task is supplied through stdin; prompts never appear in command arguments.\nA GNU timeout is enforced on the remote command, with a separate local SSH timeout.\nOnly subdirectories of `/home/dshrunner/worktrees` are permitted (no root workspace).
 SSH requires verified host keys and batch-mode authentication. The gateway is
 not given unrestricted permissions. DSH must run in a dedicated per-task workspace;
-the remote workspace must already exist. No retries occur inside the transport. DSH exit code 124/137 is treated as timed out.\nThe process capture remains buffered at this stage; the production bridge needs\nstreaming capped artifacts before enabling untrusted long-running tasks.
+the remote workspace must already exist. No retries occur inside the transport. When invoked within an existing Hermes
+worker, the adapter reads HERMES_KANBAN_DB/TASK/RUN_ID/CLAIM_LOCK and verifies
+the current claim both before and after DSH execution (read-only database query).
+A stale claim discards the DSH output. This does **not** replace the owner's
+atomic completion checks. DSH exit code 124/137 is treated as timed out.\nThe process capture remains buffered at this stage; the production bridge needs\nstreaming capped artifacts before enabling untrusted long-running tasks.
 
 ## Manual validation (no Kanban side effects)
 

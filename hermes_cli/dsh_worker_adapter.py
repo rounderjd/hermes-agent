@@ -9,6 +9,8 @@ import argparse
 from dataclasses import dataclass
 import json
 import os
+import sqlite3
+from urllib.parse import quote
 from pathlib import PurePosixPath
 import re
 import selectors
@@ -59,6 +61,39 @@ def remote_command(workspace: str, *, dsh_bin: str,
             "workspace-write", "--approval-policy", "ask", "-")
     return "cd " + shlex.quote(workspace) + " && exec " + shlex.join(args)
 
+
+
+
+@dataclass(frozen=True)
+class ClaimFence:
+    board_db: str
+    task_id: str
+    run_id: int
+    claim_lock: str
+
+
+def claim_is_current(fence: ClaimFence) -> bool:
+    """Inspect a Hermes claim without writing to its Kanban database.
+
+    A passed claim is only a point-in-time precondition; Hermes's owner-session
+    completion gate remains authoritative and must check again before finalizing.
+    """
+    if not os.path.isabs(fence.board_db) or not _SAFE_TASK.fullmatch(fence.task_id):
+        return False
+    if fence.run_id <= 0 or not fence.claim_lock:
+        return False
+    uri = "file:" + quote(fence.board_db, safe="/") + "?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True, timeout=2) as db:
+            row = db.execute(
+                "SELECT t.status, t.current_run_id, t.claim_lock, r.ended_at "
+                "FROM tasks t LEFT JOIN task_runs r ON r.id=t.current_run_id "
+                "WHERE t.id=?", (fence.task_id,)
+            ).fetchone()
+            return bool(row and row[0] == "running" and row[1] == fence.run_id
+                        and row[2] == fence.claim_lock and row[3] is None)
+    except (sqlite3.Error, OSError, ValueError):
+        return False
 
 
 def _run_streaming(argv: list[str], prompt: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
@@ -136,6 +171,7 @@ def run_dsh(
     ssh_bin: str = "ssh",
     timeout_seconds: int = 1800,
     enabled: bool = False,
+    claim_fence: ClaimFence | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> DshResult:
     """Run one bounded headless task; preserve approval refusal as a blocked result.
@@ -153,6 +189,9 @@ def run_dsh(
         raise ValueError("task prompt empty or too long")
     if not 1 <= timeout_seconds <= 7200:
         raise ValueError("timeout must be 1-7200 seconds")
+    if claim_fence is not None:
+        if task_id != claim_fence.task_id or not claim_is_current(claim_fence):
+            return DshResult("stale", None, "", "Hermes task claim is no longer current")
     command = remote_command(workspace, dsh_bin=dsh_bin, timeout_seconds=timeout_seconds)
     argv = [ssh_bin, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=15",
@@ -167,6 +206,8 @@ def run_dsh(
         return DshResult("timed_out", None, "", "DSH timeout; run requires review")
     except (OSError, ValueError) as exc:
         return DshResult("transport_error", None, "", type(exc).__name__)
+    if claim_fence is not None and not claim_is_current(claim_fence):
+        return DshResult("stale", None, "", "Hermes task claim changed during DSH run")
     # The built-in runner captures bounded streams; injected test runners are capped here.
     output = result.stdout[:_MAX_CAPTURE]
     error = result.stderr[:8192]
@@ -206,9 +247,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dsh-bin", default="/home/dshrunner/dsh-lab/node_modules/.bin/dsh")
     args = p.parse_args(argv)
     prompt = sys.stdin.read(_MAX_PROMPT + 1)
+    values = [os.environ.get(k, "") for k in (
+        "HERMES_KANBAN_DB", "HERMES_KANBAN_TASK",
+        "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK"
+    )]
+    fence = None
+    if any(values):
+        if not all(values):
+            print(json.dumps(DshResult("stale", None, "",
+                                       "Incomplete Hermes claim context").to_dict()))
+            return 1
+        try:
+            fence = ClaimFence(values[0], values[1], int(values[2]), values[3])
+        except ValueError:
+            print(json.dumps(DshResult("stale", None, "",
+                                       "Invalid Hermes claim context").to_dict()))
+            return 1
+        if args.task_id != fence.task_id:
+            print(json.dumps(DshResult("stale", None, "",
+                                       "Task identifier differs from Hermes claim").to_dict()))
+            return 1
     result = run_dsh(args.task_id, prompt, host=args.host,
                      workspace=args.workspace, timeout_seconds=args.timeout,
-                     dsh_bin=args.dsh_bin,
+                     dsh_bin=args.dsh_bin, claim_fence=fence,
                      enabled=os.environ.get("HERMES_DSH_WORKER_ENABLED") == "1")
     print(json.dumps(result.to_dict()))
     return 0 if result.status == "returned" else 1
