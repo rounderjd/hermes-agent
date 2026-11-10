@@ -37,6 +37,22 @@ class TestDshAdapter(unittest.TestCase):
             [], 1, "The answer is approval_required\n", "crash"))
         self.assertEqual(run_dsh(**self.kw, runner=runner).status, "failed")
 
+    def test_remote_timeout_exit(self):
+        runner = Mock(return_value=subprocess.CompletedProcess([], 124, "", ""))
+        self.assertEqual(run_dsh(**self.kw, runner=runner).status, "timed_out")
+
+    def test_remote_command_bounds_execution(self):
+        cmd = remote_command(self.kw["workspace"], dsh_bin="/opt/dsh", timeout_seconds=31)
+        self.assertIn("timeout --signal=TERM --kill-after=10 31", cmd)
+
+    def test_outside_allowed_workspace_rejected(self):
+        with self.assertRaises(ValueError):
+            remote_command("/home/dshrunner/dsh-lab", dsh_bin="/opt/dsh")
+
+    def test_workspace_root_itself_rejected(self):
+        with self.assertRaises(ValueError):
+            remote_command("/home/dshrunner/worktrees", dsh_bin="/opt/dsh")
+
     def test_timeout(self):
         runner = Mock(side_effect=subprocess.TimeoutExpired("ssh", 3))
         self.assertEqual(run_dsh(**self.kw, runner=runner).status, "timed_out")

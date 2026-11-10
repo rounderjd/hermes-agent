@@ -9,12 +9,15 @@ import argparse
 from dataclasses import dataclass
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 import re
 import shlex
 import subprocess
 import sys
 from typing import Callable
+
+# A headless process has no Hermes completion authority: all results are candidates.
+DEFAULT_WORKSPACE_ROOT = "/home/dshrunner/worktrees"
 
 _SAFE_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SAFE_TASK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -34,14 +37,17 @@ class DshResult:
                 "output": self.output, "error": self.error}
 
 
-def remote_command(workspace: str, *, dsh_bin: str) -> str:
+def remote_command(workspace: str, *, dsh_bin: str,
+                   timeout_seconds: int = 1800,
+                   workspace_root: str = DEFAULT_WORKSPACE_ROOT) -> str:
     """Quote fixed command tokens; never interpolate a task prompt into a shell."""
     path = PurePosixPath(workspace)
     if not workspace.startswith("/") or ".." in path.parts or "\n" in workspace:
         raise ValueError("workspace must be an absolute path without traversal")
     if not dsh_bin.startswith("/") or "\n" in dsh_bin:
         raise ValueError("dsh_bin must be an absolute executable path")
-    args = (dsh_bin, "--profile", "headless", "--json", "--permission-mode",
+    args = ("timeout", "--signal=TERM", "--kill-after=10",
+            str(timeout_seconds), dsh_bin, "--profile", "headless", "--json", "--permission-mode",
             "workspace-write", "--approval-policy", "ask", "-")
     return "cd " + shlex.quote(workspace) + " && exec " + shlex.join(args)
 
@@ -73,9 +79,10 @@ def run_dsh(
         raise ValueError("task prompt empty or too long")
     if not 1 <= timeout_seconds <= 7200:
         raise ValueError("timeout must be 1-7200 seconds")
-    command = remote_command(workspace, dsh_bin=dsh_bin)
+    command = remote_command(workspace, dsh_bin=dsh_bin, timeout_seconds=timeout_seconds)
     argv = [ssh_bin, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            "-o", "StrictHostKeyChecking=yes", "--", host, command]
+            "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=2", "--", host, command]
     try:
         result = runner(argv, input=prompt, text=True, capture_output=True,
                         timeout=timeout_seconds, check=False)
@@ -83,10 +90,13 @@ def run_dsh(
         return DshResult("timed_out", None, "", "DSH timeout; run requires review")
     except OSError as exc:
         return DshResult("transport_error", None, "", type(exc).__name__)
-    # Bounded rendering prevents untrusted agent output exhausting coordinator memory.
+    # Bounded result fields; a later owner integration must additionally stream stdout
+    # to capped files rather than buffering the complete subprocess output.
     output = result.stdout[:_MAX_CAPTURE]
     error = result.stderr[:8192]
-    if result.returncode:
+    if result.returncode in (124, 137):
+        status = "timed_out"  # remote GNU timeout; never claim completion
+    elif result.returncode:
         status = "approval_blocked" if _is_approval_blocked(output, error) else "failed"
     else:
         # Successful process exit is evidence of execution, NOT permission to mark
