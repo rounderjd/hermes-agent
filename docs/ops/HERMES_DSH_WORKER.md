@@ -16,14 +16,19 @@ DSH is invoked through SSH on Helium WSL using:
 dsh --profile headless --json --permission-mode workspace-write --approval-policy ask -
 ```
 
-The task is supplied through stdin; prompts never appear in command arguments.\nA GNU timeout is enforced on the remote command, with a separate local SSH timeout.\nOnly subdirectories of `/home/dshrunner/worktrees` are permitted (no root workspace).
+The task is supplied through stdin; prompts never appear in command arguments.
+A GNU timeout is enforced on the remote command, with a separate local SSH timeout.
+Only subdirectories of `/home/dshrunner/worktrees` are permitted (no root workspace).
 SSH requires verified host keys and batch-mode authentication. The gateway is
 not given unrestricted permissions. DSH must run in a dedicated per-task workspace;
 the remote workspace must already exist. No retries occur inside the transport. When invoked within an existing Hermes
 worker, the adapter reads HERMES_KANBAN_DB/TASK/RUN_ID/CLAIM_LOCK and verifies
 the current claim both before and after DSH execution (read-only database query).
 A stale claim discards the DSH output. This does **not** replace the owner's
-atomic completion checks. DSH exit code 124/137 is treated as timed out.\nThe process capture remains buffered at this stage; the production bridge needs\nstreaming capped artifacts before enabling untrusted long-running tasks.
+atomic completion checks. DSH exit code 124/137 is treated as timed out.
+The subprocess runner drains stdout and stderr into bounded in-memory buffers.
+The production bridge still needs persisted, redacted run artifacts and verified
+NDJSON event parsing before unattended long-running tasks.
 
 ## Manual validation (no Kanban side effects)
 
