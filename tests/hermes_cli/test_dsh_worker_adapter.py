@@ -3,7 +3,6 @@ from contextlib import closing
 import os
 import sqlite3
 import signal
-import time
 import pytest
 import subprocess
 import sys
@@ -13,6 +12,7 @@ import unittest
 from unittest.mock import Mock
 
 from hermes_cli.dsh_worker_adapter import run_dsh, remote_command, _run_streaming, ClaimFence, claim_is_current
+from tests.waiting import wait_until
 
 
 class TestDshAdapter(unittest.TestCase):
@@ -132,15 +132,14 @@ class TestDshAdapter(unittest.TestCase):
                 _run_streaming([sys.executable, "-c", child_script, str(pidfile)], "task", 1)
             self.assertTrue(pidfile.exists())
             pid = int(pidfile.read_text())
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
+            def _gone() -> bool:
                 try:
                     os.kill(pid, 0)
                 except ProcessLookupError:
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("descendant process survived SSH process-group timeout")
+                    return True
+                return False
+
+            wait_until(_gone, timeout=3, what="descendant process to exit")
 
     def test_timeout(self):
         runner = Mock(side_effect=subprocess.TimeoutExpired("ssh", 3))

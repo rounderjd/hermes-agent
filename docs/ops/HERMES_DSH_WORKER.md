@@ -18,7 +18,8 @@ dsh --profile headless --json --permission-mode workspace-write --approval-polic
 
 The task is supplied through stdin; prompts never appear in command arguments.
 A GNU timeout is enforced on the remote command, with a separate local SSH timeout.
-Only subdirectories of `/home/dshrunner/worktrees` are permitted (no root workspace).
+Workspace paths must be lexically below `/home/dshrunner/worktrees` (not the root itself).
+Symlinks can resolve outside this root. Remote provisioning and permissions must enforce containment.
 SSH requires verified host keys and batch-mode authentication. The gateway is
 not given unrestricted permissions. DSH must run in a dedicated per-task workspace;
 the remote workspace must already exist. No retries occur inside the transport. When invoked within an existing Hermes
