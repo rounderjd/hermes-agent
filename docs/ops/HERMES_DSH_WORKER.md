@@ -53,3 +53,32 @@ printf '%s' 'Inspect this workspace and report findings; make no changes.' |
 The current adapter is intentionally not wired into `_default_spawn`: simply
 returning a PID would deceive Hermes's task lifecycle, because a DSH headless
 process cannot complete a Hermes Kanban task through the owner-session receipt.
+
+
+## Optional Hermes owner-mediated delegation plugin
+
+The reference plugin lives under `integrations/dsh_kanban_bridge`. It is
+**not installed or activated** by this PR. Pilot installation requires the
+operator to copy the plugin manifest and Python entrypoint to a selected
+Hermes profile plugin directory, enable the `dsh_worker` toolset, and
+explicitly set `HERMES_DSH_WORKER_ENABLED=1` for that profile. Do not
+enable this flag on a general/shared Hermes dispatcher.
+
+The model-visible `dsh_delegate_kanban(prompt)` tool refuses invocation
+without a dispatcher-owned Hermes Kanban session. The task ID, run ID, and
+claim-lock come only from Hermes's worker context; the model cannot select
+another task. The adapter verifies the current claim against the Kanban
+database before and after remote execution, returning `stale` when
+ownership changed.
+
+The remote worktree path is derived as
+`/home/dshrunner/worktrees/<task-id>-run-<run-id>`. The operator must first
+provision that worktree with the intended repository contents and SSH
+identity. The integration neither copies repositories nor grants new
+network or filesystem permissions.
+
+**Completion remains with Hermes:** a DSH return is evidence for the
+Hermes worker to examine; the owner-session `kanban_complete` and PR
+acceptance gates still decide task completion. Risky operations requested
+by DSH must fail closed until an attended approval/resume mechanism is
+implemented. This pilot is not the future automatic DSH dispatch route.
