@@ -1,6 +1,6 @@
 # Hermes → DeepSeek Harness worker transport (experimental)
 
-This PR introduces a **transport-only**, disabled-by-default headless executor. It
+This module provides a **transport-only**, disabled-by-default headless executor. It
 does not change Kanban dispatch or install an unattended DSH worker in production.
 
 ## Contract

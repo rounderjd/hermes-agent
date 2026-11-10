@@ -1,5 +1,10 @@
 """Transport-only unit tests; no SSH, model, or credentials required."""
+from contextlib import closing
+import os
 import sqlite3
+import signal
+import time
+import pytest
 import subprocess
 import sys
 import tempfile
@@ -62,6 +67,21 @@ class TestDshAdapter(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "ok")
 
+    def test_streaming_truncates_stderr_without_aborting(self):
+        result = _run_streaming(
+            [sys.executable, "-c", "import sys; sys.stderr.write('w' * 20000); print('ok')"],
+            "task", 5,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "ok")
+        self.assertEqual(len(result.stderr), 8192)
+
+    def test_local_timeout_includes_connection_and_kill_grace(self):
+        runner = Mock(return_value=subprocess.CompletedProcess([], 124, "", ""))
+        run_dsh(**(self.kw | {"timeout_seconds": 31}), runner=runner)
+        self.assertEqual(runner.call_args.kwargs["timeout"], 61)
+        self.assertIn(" --kill-after=10 31 ", runner.call_args.args[0][-1])
+
     def test_streaming_rejects_large_output(self):
         with self.assertRaises(ValueError):
             _run_streaming([sys.executable, "-c", "print('x' * (5 * 1024 * 1024))"], "task", 5)
@@ -69,7 +89,7 @@ class TestDshAdapter(unittest.TestCase):
     def test_hermes_claim_pre_and_post_conditions(self):
         with tempfile.TemporaryDirectory() as root:
             db = str(Path(root) / "board.db")
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con, con:
                 con.execute("CREATE TABLE tasks (id TEXT, status TEXT, current_run_id INTEGER, claim_lock TEXT)")
                 con.execute("CREATE TABLE task_runs (id INTEGER, ended_at INTEGER)")
                 con.execute("INSERT INTO tasks VALUES ('t_1234', 'running', 7, 'lock-a')")
@@ -77,7 +97,7 @@ class TestDshAdapter(unittest.TestCase):
             fence = ClaimFence(db, "t_1234", 7, "lock-a")
             self.assertTrue(claim_is_current(fence))
             def swapped_runner(*_args, **_kwargs):
-                with sqlite3.connect(db) as con:
+                with closing(sqlite3.connect(db)) as con, con:
                     con.execute("UPDATE tasks SET claim_lock='lock-b'")
                 return subprocess.CompletedProcess([], 0, "completed", "")
             result = run_dsh(**self.kw, claim_fence=fence, runner=swapped_runner)
@@ -92,6 +112,35 @@ class TestDshAdapter(unittest.TestCase):
             result = run_dsh(**self.kw, claim_fence=fence, runner=runner)
             self.assertEqual(result.status, "stale")
             runner.assert_not_called()
+
+    @pytest.mark.platforms("posix")
+    def test_streaming_timeout_terminates_descendant(self):
+        with tempfile.TemporaryDirectory() as root:
+            pidfile = Path(root) / "grandchild.pid"
+            child_script = (
+                "import subprocess,sys,time,signal\n"
+                "p=subprocess.Popen([sys.executable,'-c',"
+                "'import time; time.sleep(60)'])\n"
+                "open(sys.argv[1],'w').write(str(p.pid))\n"
+                "def shutdown(sig,frame):\n"
+                " p.wait(timeout=3)\n"
+                " sys.exit(0)\n"
+                "signal.signal(signal.SIGTERM,shutdown)\n"
+                "time.sleep(60)\n"
+            )
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _run_streaming([sys.executable, "-c", child_script, str(pidfile)], "task", 1)
+            self.assertTrue(pidfile.exists())
+            pid = int(pidfile.read_text())
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("descendant process survived SSH process-group timeout")
 
     def test_timeout(self):
         runner = Mock(side_effect=subprocess.TimeoutExpired("ssh", 3))

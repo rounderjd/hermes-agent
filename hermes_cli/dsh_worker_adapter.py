@@ -6,6 +6,7 @@ verify the artifacts and apply its existing task completion/approval gates.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from dataclasses import dataclass
 import json
 import os
@@ -84,7 +85,7 @@ def claim_is_current(fence: ClaimFence) -> bool:
         return False
     uri = "file:" + quote(fence.board_db, safe="/") + "?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True, timeout=2) as db:
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
             row = db.execute(
                 "SELECT t.status, t.current_run_id, t.claim_lock, r.ended_at "
                 "FROM tasks t LEFT JOIN task_runs r ON r.id=t.current_run_id "
@@ -140,7 +141,9 @@ def _run_streaming(argv: list[str], prompt: str, timeout_seconds: int) -> subpro
                     continue
                 target, limit = (stdout, _MAX_CAPTURE) if tag == "out" else (stderr, 8192)
                 if len(target) + len(chunk) > limit:
-                    raise ValueError("DSH output exceeded capture limit")
+                    if tag == "out":
+                        raise ValueError("DSH output exceeded capture limit")
+                    chunk = chunk[:max(0, limit - len(target))]
                 target.extend(chunk)
         rc = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
         return subprocess.CompletedProcess(
@@ -196,12 +199,16 @@ def run_dsh(
     argv = [ssh_bin, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=2", "--", host, command]
+    # SSH connection setup and the remote kill-after grace happen outside
+    # the remote GNU timeout clock. Give the local watchdog time to observe
+    # remote exit before forcibly closing the SSH connection.
+    local_timeout_seconds = timeout_seconds + 30
     try:
         if runner is None:
-            result = _run_streaming(argv, prompt, timeout_seconds)
+            result = _run_streaming(argv, prompt, local_timeout_seconds)
         else:
             result = runner(argv, input=prompt, text=True, capture_output=True,
-                            timeout=timeout_seconds, check=False)
+                            timeout=local_timeout_seconds, check=False)
     except subprocess.TimeoutExpired:
         return DshResult("timed_out", None, "", "DSH timeout; run requires review")
     except (OSError, ValueError) as exc:

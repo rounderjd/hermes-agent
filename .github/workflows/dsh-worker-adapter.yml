@@ -27,4 +27,4 @@ jobs:
       - name: Syntax check
         run: python -m py_compile hermes_cli/dsh_worker_adapter.py integrations/dsh_kanban_bridge/__init__.py tests/hermes_cli/test_dsh_worker_adapter.py tests/hermes_cli/test_dsh_kanban_bridge.py
       - name: Focused tests
-        run: python -m unittest -v tests.hermes_cli.test_dsh_worker_adapter tests.hermes_cli.test_dsh_kanban_bridge
+        run: scripts/run_tests.sh tests/hermes_cli/test_dsh_worker_adapter.py tests/hermes_cli/test_dsh_kanban_bridge.py -v
