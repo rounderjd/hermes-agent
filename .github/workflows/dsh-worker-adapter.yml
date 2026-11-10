@@ -1,0 +1,28 @@
+name: DSH worker adapter validation
+
+on:
+  pull_request:
+    paths:
+      - 'hermes_cli/dsh_worker_adapter.py'
+      - 'tests/hermes_cli/test_dsh_worker_adapter.py'
+      - '.github/workflows/dsh-worker-adapter.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Syntax check
+        run: python -m py_compile hermes_cli/dsh_worker_adapter.py tests/hermes_cli/test_dsh_worker_adapter.py
+      - name: Focused tests
+        run: python -m unittest -v tests.hermes_cli.test_dsh_worker_adapter
