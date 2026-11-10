@@ -44,6 +44,11 @@ def remote_command(workspace: str, *, dsh_bin: str,
     path = PurePosixPath(workspace)
     if not workspace.startswith("/") or ".." in path.parts or "\n" in workspace:
         raise ValueError("workspace must be an absolute path without traversal")
+    root = PurePosixPath(workspace_root)
+    if not workspace_root.startswith("/") or ".." in root.parts:
+        raise ValueError("workspace root must be an absolute path")
+    if path == root or root not in path.parents:
+        raise ValueError("task workspace must be strictly below allowed workspace root")
     if not dsh_bin.startswith("/") or "\n" in dsh_bin:
         raise ValueError("dsh_bin must be an absolute executable path")
     args = ("timeout", "--signal=TERM", "--kill-after=10",
