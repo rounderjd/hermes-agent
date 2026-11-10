@@ -1,9 +1,10 @@
 """Transport-only unit tests; no SSH, model, or credentials required."""
 import subprocess
+import sys
 import unittest
 from unittest.mock import Mock
 
-from hermes_cli.dsh_worker_adapter import run_dsh, remote_command
+from hermes_cli.dsh_worker_adapter import run_dsh, remote_command, _run_streaming
 
 
 class TestDshAdapter(unittest.TestCase):
@@ -52,6 +53,15 @@ class TestDshAdapter(unittest.TestCase):
     def test_workspace_root_itself_rejected(self):
         with self.assertRaises(ValueError):
             remote_command("/home/dshrunner/worktrees", dsh_bin="/opt/dsh")
+
+    def test_streaming_captures_short_output(self):
+        result = _run_streaming([sys.executable, "-c", "print('ok')"], "task", 5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_streaming_rejects_large_output(self):
+        with self.assertRaises(ValueError):
+            _run_streaming([sys.executable, "-c", "print('x' * (5 * 1024 * 1024))"], "task", 5)
 
     def test_timeout(self):
         runner = Mock(side_effect=subprocess.TimeoutExpired("ssh", 3))

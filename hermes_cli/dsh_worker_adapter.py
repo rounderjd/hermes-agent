@@ -11,9 +11,12 @@ import json
 import os
 from pathlib import PurePosixPath
 import re
+import selectors
+import signal
 import shlex
 import subprocess
 import sys
+import time
 from typing import Callable
 
 # A headless process has no Hermes completion authority: all results are candidates.
@@ -57,6 +60,72 @@ def remote_command(workspace: str, *, dsh_bin: str,
     return "cd " + shlex.quote(workspace) + " && exec " + shlex.join(args)
 
 
+
+def _run_streaming(argv: list[str], prompt: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    """Bound stdout/stderr while executing SSH; terminate the process group on failure.
+
+    No terminal is allocated. stdin is pumped nonblocking so a remote agent that
+    stops reading cannot strand the owner. Output is never spooled unboundedly.
+    """
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
+    assert proc.stdin and proc.stdout and proc.stderr
+    stdin_data = prompt.encode("utf-8")
+    sent = 0
+    stdout, stderr = bytearray(), bytearray()
+    selector = selectors.DefaultSelector()
+    try:
+        for stream, direction, tag in (
+                (proc.stdin, selectors.EVENT_WRITE, "in"),
+                (proc.stdout, selectors.EVENT_READ, "out"),
+                (proc.stderr, selectors.EVENT_READ, "err")):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, direction, tag)
+        deadline = time.monotonic() + timeout_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout_seconds)
+            for key, _ in selector.select(min(remaining, 0.5)):
+                stream, tag = key.fileobj, key.data
+                if tag == "in":
+                    try:
+                        size = os.write(stream.fileno(), stdin_data[sent:]) if sent < len(stdin_data) else 0
+                    except BrokenPipeError:
+                        size = 0
+                    sent += size
+                    if sent >= len(stdin_data) or size == 0:
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+                chunk = os.read(stream.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                target, limit = (stdout, _MAX_CAPTURE) if tag == "out" else (stderr, 8192)
+                if len(target) + len(chunk) > limit:
+                    raise ValueError("DSH output exceeded capture limit")
+                target.extend(chunk)
+        rc = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(
+            argv, rc, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+        )
+    finally:
+        selector.close()
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=2)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream and not stream.closed:
+                stream.close()
+
+
 def run_dsh(
     task_id: str,
     prompt: str,
@@ -67,7 +136,7 @@ def run_dsh(
     ssh_bin: str = "ssh",
     timeout_seconds: int = 1800,
     enabled: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> DshResult:
     """Run one bounded headless task; preserve approval refusal as a blocked result.
 
@@ -89,14 +158,16 @@ def run_dsh(
             "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=2", "--", host, command]
     try:
-        result = runner(argv, input=prompt, text=True, capture_output=True,
-                        timeout=timeout_seconds, check=False)
+        if runner is None:
+            result = _run_streaming(argv, prompt, timeout_seconds)
+        else:
+            result = runner(argv, input=prompt, text=True, capture_output=True,
+                            timeout=timeout_seconds, check=False)
     except subprocess.TimeoutExpired:
         return DshResult("timed_out", None, "", "DSH timeout; run requires review")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return DshResult("transport_error", None, "", type(exc).__name__)
-    # Bounded result fields; a later owner integration must additionally stream stdout
-    # to capped files rather than buffering the complete subprocess output.
+    # The built-in runner captures bounded streams; injected test runners are capped here.
     output = result.stdout[:_MAX_CAPTURE]
     error = result.stderr[:8192]
     if result.returncode in (124, 137):
