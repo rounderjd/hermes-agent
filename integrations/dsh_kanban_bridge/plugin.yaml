@@ -1,0 +1,9 @@
+name: dsh-kanban-bridge
+version: 0.1.0
+description: Optional owner-mediated Hermes to DSH delegation tool
+author: homelab
+kind: standalone
+platforms:
+  - linux
+provides_tools:
+  - dsh_delegate_kanban
